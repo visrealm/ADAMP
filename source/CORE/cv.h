@@ -174,8 +174,29 @@ extern void RenderCalcPalette(BYTE *cv_palette_out, int nbcolors);
 #ifndef COLECO_VDP_F18A
 #define COLECO_VDP_F18A  1
 #endif
+/* A PICO9918 answers every F18A feature test but is its own board, so it gets its
+   own type. Test features with coleco_vdp_has_f18a(); comparing against
+   COLECO_VDP_F18A now means "F18A and not a PICO9918". */
+#ifndef COLECO_VDP_PICO9918
+#define COLECO_VDP_PICO9918  2
+#endif
+
+/* Which implementation renders the VDP. Orthogonal to the type: the type is the
+   chip emulated, the engine is whose code does it. */
+#ifndef COLECO_VDP_ENGINE_LEGACY
+#define COLECO_VDP_ENGINE_LEGACY    0
+#endif
+#ifndef COLECO_VDP_ENGINE_PICO9918
+#define COLECO_VDP_ENGINE_PICO9918  1
+#endif
+
+void coleco_set_vdp_engine(int engine);
+int  coleco_get_vdp_engine(void);
 
 void coleco_set_vdp_type(int vdpType);
 int  coleco_get_vdp_type(void);
+
+/* Non-zero for any VDP that answers the F18A feature set: an F18A or a PICO9918. */
+int  coleco_vdp_has_f18a(void);
 
 #endif
