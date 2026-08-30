@@ -52,6 +52,7 @@
 #include "GRAPH/f18a_term80.h"
 #include "GRAPH/f18a_term80_cpm.h"
 #include "GRAPH/f18a_term80_tdos.h"
+#include "vdp_bridge.h"
 
 // BIOS loader prototype
 static int loadBios(const char *filename, BYTE *memory, int sizerm);
@@ -291,8 +292,15 @@ static inline void DKA_TRACE_BANK(const QString&)
 #ifndef COLECO_VDP_F18A
 #define COLECO_VDP_F18A  1
 #endif
+#ifndef COLECO_VDP_PICO9918
+#define COLECO_VDP_PICO9918  2
+#endif
 
 static int  g_vdpType = COLECO_VDP_TMS;
+static int  g_vdpEngine = COLECO_VDP_ENGINE_LEGACY;
+static bool g_vdpEngineResolved = false;
+static bool g_vdpEnginePinned = false;
+static void vdp_engine_resolve(void);
 static bool g_f18a_irq_level = false;
 
 static inline unsigned int vdp_current_scanlines()
@@ -312,7 +320,7 @@ static inline unsigned int vdp_current_scanlines()
     if (emulator->NTSC)
         return TMS9918_LINES;
 
-    if (g_vdpType == COLECO_VDP_F18A)
+    if (coleco_vdp_has_f18a())
         return TMS9918_LINES;
 
     return TMS9929_LINES;
@@ -325,9 +333,22 @@ static inline void f18a_sync_timing()
 
 void coleco_set_vdp_type(int vdpType)
 {
-    g_vdpType = (vdpType == COLECO_VDP_F18A) ? COLECO_VDP_F18A : COLECO_VDP_TMS;
-    f18a_set_enabled(g_vdpType == COLECO_VDP_F18A);
+    g_vdpType = (vdpType == COLECO_VDP_F18A || vdpType == COLECO_VDP_PICO9918)
+                    ? vdpType
+                    : COLECO_VDP_TMS;
+
+    /* A PICO9918 answers the F18A feature set, so the F18A module stays enabled. */
+    f18a_set_enabled(coleco_vdp_has_f18a() != 0);
     g_f18a_irq_level = false;
+
+    /* The engine follows the chosen hardware unless pinned: only a PICO9918 is
+       rendered by pico9918-core. ADAMP_VDP_ENGINE pins it for bring-up. */
+    vdp_engine_resolve();
+    if (!g_vdpEnginePinned)
+    {
+        g_vdpEngine = (g_vdpType == COLECO_VDP_PICO9918) ? COLECO_VDP_ENGINE_PICO9918
+                                                         : COLECO_VDP_ENGINE_LEGACY;
+    }
 
     /*
      * Belangrijk:
@@ -349,9 +370,58 @@ static inline bool coleco_vdp_is_f18a(void)
     return g_vdpType == COLECO_VDP_F18A;
 }
 
+int coleco_vdp_has_f18a(void)
+{
+    return (g_vdpType == COLECO_VDP_F18A || g_vdpType == COLECO_VDP_PICO9918) ? 1 : 0;
+}
+
+void coleco_set_vdp_engine(int engine)
+{
+    g_vdpEngineResolved = true;
+    g_vdpEnginePinned = true;
+    g_vdpEngine = (engine == COLECO_VDP_ENGINE_PICO9918) ? COLECO_VDP_ENGINE_PICO9918
+                                                         : COLECO_VDP_ENGINE_LEGACY;
+}
+
+int coleco_get_vdp_engine(void)
+{
+    vdp_engine_resolve(); /* the UI asks before any frame runs */
+    return g_vdpEngine;
+}
+
+/* Bring-up switch: ADAMP_VDP_ENGINE=pico9918 selects the new engine. Resolved once,
+   on first use, so a frame never changes engine underneath itself.
+   coleco_set_vdp_engine() overrides whatever the environment asked for. */
+static void vdp_engine_resolve(void)
+{
+    if (g_vdpEngineResolved)
+        return;
+
+    g_vdpEngineResolved = true;
+
+    const char* requested = std::getenv("ADAMP_VDP_ENGINE");
+    if (requested && std::strcmp(requested, "pico9918") == 0)
+    {
+        g_vdpEngine = COLECO_VDP_ENGINE_PICO9918;
+        g_vdpEnginePinned = true;
+    }
+}
+
+static inline bool coleco_vdp_is_pico9918(void)
+{
+    vdp_engine_resolve();
+    return g_vdpEngine == COLECO_VDP_ENGINE_PICO9918;
+}
+
 static inline void vdp_reset_active(void)
 {
     g_f18a_irq_level = false;
+
+    if (coleco_vdp_is_pico9918())
+    {
+        vdp_bridge_reset(vdp_current_scanlines());
+        return;
+    }
 
     if (g_vdpType == COLECO_VDP_F18A)
     {
@@ -366,6 +436,12 @@ static inline void vdp_reset_active(void)
 
 static inline void vdp_writedata_active(BYTE value)
 {
+    if (coleco_vdp_is_pico9918())
+    {
+        vdp_bridge_writedata((unsigned char)value);
+        return;
+    }
+
     if (coleco_vdp_is_f18a())
     {
         f18a_writedata((unsigned char)value);
@@ -377,6 +453,12 @@ static inline void vdp_writedata_active(BYTE value)
 
 static inline void vdp_writectrl_active(BYTE value)
 {
+
+    if (coleco_vdp_is_pico9918())
+    {
+        vdp_bridge_writectrl((unsigned char)value);
+        return;
+    }
 
     if (coleco_vdp_is_f18a())
     {
@@ -391,6 +473,9 @@ static inline void vdp_writectrl_active(BYTE value)
 
 static inline BYTE vdp_readdata_active(void)
 {
+    if (coleco_vdp_is_pico9918())
+        return (BYTE)vdp_bridge_readdata();
+
     if (coleco_vdp_is_f18a())
         return (BYTE)f18a_readdata();
 
@@ -400,6 +485,17 @@ static inline BYTE vdp_readdata_active(void)
 static inline BYTE vdp_readctrl_active(void)
 {
     BYTE value = 0;
+
+    if (coleco_vdp_is_pico9918())
+    {
+        /* Same NMI de-assert the other two paths do on a status read. */
+        value = (BYTE)vdp_bridge_readctrl();
+
+        g_f18a_irq_level = false;
+        z80_set_irq_line(INPUT_LINE_NMI, CLEAR_LINE);
+
+        return value;
+    }
 
     if (coleco_vdp_is_f18a())
     {
@@ -438,6 +534,11 @@ static inline BYTE vdp_readctrl_active(void)
 static inline void vdp_loop_active(void)
 {
 
+    if (coleco_vdp_is_pico9918())
+    {
+        g_f18a_irq_level = (vdp_bridge_loop() != 0);
+        return;
+    }
 
     if (coleco_vdp_is_f18a())
     {
@@ -468,6 +569,9 @@ static inline void vdp_loop_active(void)
 
 static inline bool vdp_irq_level_active(void)
 {
+    if (coleco_vdp_is_pico9918())
+        return g_f18a_irq_level;
+
     if (coleco_vdp_is_f18a())
         return g_f18a_irq_level;
 
@@ -2317,7 +2421,7 @@ int coleco_do_scanline(void)
 
             DEBUG_BRIDGE.setCurrentOpcodeStartPC(Z80.pc.w.l);
 
-            if (coleco_get_vdp_type() == COLECO_VDP_F18A)
+            if (coleco_vdp_has_f18a())
             {
                 if (m_cpm_enabled && m_tdos_enabled)
                 {
@@ -2522,7 +2626,7 @@ int coleco_cpu_execute_one_step() {
         return 0; // 0 cycles uitgevoerd
     }
 
-     if (coleco_get_vdp_type() == COLECO_VDP_F18A) {
+     if (coleco_vdp_has_f18a()) {
           if (m_cpm_enabled && m_tdos_enabled)
                    f18a_term80_tdos_before_opcode();
          else
